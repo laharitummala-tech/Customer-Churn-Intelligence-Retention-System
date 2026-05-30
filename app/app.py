@@ -1,6 +1,11 @@
 import streamlit as st
 import pandas as pd
 
+from utils.validator import DataValidator
+from utils.preprocessing import preprocess_data
+from utils.prediction import predict_churn, risk_segment
+
+
 st.set_page_config(
     page_title="Customer Churn Intelligence System",
     page_icon="📊",
@@ -10,41 +15,34 @@ st.set_page_config(
 st.title("📊 Customer Churn Intelligence System")
 st.write("Upload customer data, validate quality, clean issues, and predict churn risk.")
 
+validator = DataValidator()
+
 uploaded_file = st.sidebar.file_uploader("Upload CSV file", type=["csv"])
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
 
-    # 1. Overview
+    validation_result = validator.validate(df)
+    clean_df = validation_result["clean_df"].copy()
+    duplicate_count = clean_df.duplicated().sum()
+
+    clean_df.insert(0, "Customer_ID", range(1, len(clean_df) + 1))
+    
     st.header("1. Dataset Overview")
 
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Rows", df.shape[0])
-    col2.metric("Columns", df.shape[1])
-    col3.metric("Duplicate Rows", df.duplicated().sum())
-    col4.metric("Missing Cells", df.isnull().sum().sum())
+    col1.metric("Rows", clean_df.shape[0])
+    col2.metric("Columns", clean_df.shape[1])
+    col3.metric("Duplicate Rows", duplicate_count)
+    col4.metric("Missing Cells", clean_df.isnull().sum().sum())
 
-    # 2. Preview
     st.header("2. Dataset Preview")
-    st.dataframe(df.head(20), use_container_width=True)
+    st.dataframe(clean_df.head(20), use_container_width=True)
 
-    # 3. Column Validation
     st.header("3. Column Validation")
 
-    expected_columns = [
-        "Age", "Gender", "Country", "City", "Membership_Years",
-        "Login_Frequency", "Session_Duration_Avg", "Pages_Per_Session",
-        "Cart_Abandonment_Rate", "Wishlist_Items", "Total_Purchases",
-        "Average_Order_Value", "Days_Since_Last_Purchase",
-        "Discount_Usage_Rate", "Returns_Rate", "Email_Open_Rate",
-        "Customer_Service_Calls", "Product_Reviews_Written",
-        "Social_Media_Engagement_Score", "Mobile_App_Usage",
-        "Payment_Method_Diversity", "Lifetime_Value", "Credit_Balance",
-        "Signup_Quarter"
-    ]
-
-    missing_cols = [col for col in expected_columns if col not in df.columns]
-    extra_cols = [col for col in df.columns if col not in expected_columns]
+    missing_cols = validation_result["missing_columns"]
+    extra_cols = validation_result["extra_columns"]
 
     if len(missing_cols) == 0:
         st.success("All required columns are present.")
@@ -56,60 +54,145 @@ if uploaded_file is not None:
         st.warning("Extra columns found:")
         st.write(extra_cols)
 
-    # 4. Duplicate Rows
-    st.header("4. Duplicate Rows")
+    st.header("4. Missing Values Report")
 
-    duplicate_count = df.duplicated().sum()
-    st.write("Duplicate rows found:", duplicate_count)
-
-    if duplicate_count > 0:
-        st.dataframe(df[df.duplicated()].head(20), use_container_width=True)
-
-    # 5. Missing Values
-    st.header("5. Missing Values Report")
-
-    missing_df = pd.DataFrame({
-        "Column": df.columns,
-        "Missing Count": df.isnull().sum().values,
-        "Missing Percentage": (df.isnull().mean() * 100).round(2).values
-    })
-
-    missing_df = missing_df[missing_df["Missing Count"] > 0]
+    missing_df = validation_result["missing_report"]
 
     if missing_df.empty:
         st.success("No missing values found.")
     else:
         st.dataframe(missing_df, use_container_width=True)
 
-    # 6. Invalid Values
-    st.header("6. Invalid Values Report")
+    st.header("5. Invalid Values Report")
 
-    invalid_report = {}
+    invalid_df = validation_result["invalid_report"]
 
-    if "Age" in df.columns:
-        invalid_report["Age < 18 or Age > 90"] = ((df["Age"] < 18) | (df["Age"] > 90)).sum()
+    if invalid_df.empty:
+        st.success("No invalid values found.")
+    else:
+        col1, col2 = st.columns(2)
+        col1.metric("Invalid Rules Triggered", invalid_df.shape[0])
+        col2.metric("Total Invalid Values", invalid_df["Invalid Count"].sum())
 
-    if "Total_Purchases" in df.columns:
-        invalid_report["Total_Purchases < 0"] = (df["Total_Purchases"] < 0).sum()
+        st.dataframe(invalid_df, use_container_width=True)
 
-    if "Cart_Abandonment_Rate" in df.columns:
-        invalid_report["Cart_Abandonment_Rate > 100"] = (df["Cart_Abandonment_Rate"] > 100).sum()
+    if validation_result["is_valid"]:
+        st.header("6. Data Preprocessing")
 
-    if "Discount_Usage_Rate" in df.columns:
-        invalid_report["Discount_Usage_Rate > 100"] = (df["Discount_Usage_Rate"] > 100).sum()
+        model_input_df = clean_df.drop(columns=["Customer_ID"])
 
-    if "Returns_Rate" in df.columns:
-        invalid_report["Returns_Rate > 100"] = (df["Returns_Rate"] > 100).sum()
+        processed_df = preprocess_data(model_input_df)
 
-    invalid_df = pd.DataFrame(
-        invalid_report.items(),
-        columns=["Invalid Rule", "Invalid Count"]
-    )
+        st.success("Invalid values handled.")
+        st.success("Missing values imputed.")
+        st.success("Categorical encoding completed.")
+        st.success("Data is ready for prediction.")
 
-    st.dataframe(invalid_df, use_container_width=True)
+        st.write("Processed data shape:", processed_df.shape)
 
-    st.header("7. Prediction")
-    st.info("Prediction section will be added after connecting saved model artifacts.")
+        st.header("7. Prediction Results")
+
+        predictions, probabilities = predict_churn(processed_df)
+
+        final_df = clean_df.copy()
+        final_df["Churn_Prediction"] = predictions
+        final_df["Churn_Probability"] = probabilities
+        final_df["Risk_Segment"] = final_df["Churn_Probability"].apply(risk_segment)
+        
+        total_revenue = final_df["Lifetime_Value"].sum()
+        revenue_at_risk = (final_df["Lifetime_Value"] * final_df["Churn_Probability"]).sum()
+
+        high_risk_count = (final_df["Risk_Segment"] == "High Risk").sum()
+        medium_risk_count = (final_df["Risk_Segment"] == "Medium Risk").sum()
+        low_risk_count = (final_df["Risk_Segment"] == "Low Risk").sum()
+
+        st.header("7. Business Impact Dashboard")
+
+        st.markdown("""
+        <style>
+        .metric-card {
+            background: linear-gradient(135deg, #ffffff, #f8f9ff);
+            padding: 22px;
+            border-radius: 18px;
+            box-shadow: 0px 4px 15px rgba(0,0,0,0.08);
+            text-align: center;
+            border: 1px solid #eeeeee;
+        }
+        .metric-title {
+            font-size: 15px;
+            color: #6c757d;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        .metric-value {
+            font-size: 28px;
+            color: #222;
+            font-weight: 800;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+
+        col1.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">💰 Total Revenue</div>
+            <div class="metric-value">${total_revenue:,.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col2.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">⚠️ Revenue At Risk</div>
+            <div class="metric-value">${revenue_at_risk:,.0f}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col3.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">🔴 High Risk</div>
+            <div class="metric-value">{high_risk_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col4.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">🟠 Medium Risk</div>
+            <div class="metric-value">{medium_risk_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        col5.markdown(f"""
+        <div class="metric-card">
+            <div class="metric-title">🟢 Low Risk</div>
+            <div class="metric-value">{low_risk_count}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.subheader("Filter Customers by Risk Segment")
+        
+        
+        risk_filter = st.multiselect(
+            "Select Risk Segment",
+            options=["High Risk", "Medium Risk", "Low Risk"],
+            default=["High Risk", "Medium Risk", "Low Risk"]
+        )
+
+        filtered_df = final_df[final_df["Risk_Segment"].isin(risk_filter)]
+
+        st.dataframe(
+            filtered_df[[
+                "Customer_ID",
+                "Churn_Prediction",
+                "Churn_Probability",
+                "Risk_Segment"
+            ]],
+            use_container_width=True
+        )
+
+        
+    else:
+        st.error("Fix missing columns before prediction.")
 
 else:
     st.info("Upload a CSV file from the sidebar to begin.")
