@@ -1,3 +1,10 @@
+## Live Demo
+
+🚀 Hugging Face Deployment:
+
+https://huggingface.co/spaces/LahariTummala/customer-churn-intelligence-system
+
+
 ---
 title: Customer Churn Intelligence & Retention System
 emoji: 📊
